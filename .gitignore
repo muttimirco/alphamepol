@@ -1,0 +1,31 @@
+# mac os
+.DS_Store
+
+# editors
+.idea/
+.vscode
+
+# python
+__pycache__/
+.venv
+venv
+
+# code
+metaworld
+test
+bash
+visualize
+
+# f2format
+archive
+
+# data
+mepol_exp
+final_runs
+grid_counterexample
+antmaze_runs
+multi_grid
+src/experiments/minigrid/
+src/experiments/goal_rl
+old_runs
+*.out
