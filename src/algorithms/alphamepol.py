@@ -155,14 +155,11 @@ def collect_particles_and_compute_knn(training_envs, sampling_dist, policy, num_
         
         if (trajectory % batch_dimension == 0) or (num_batches == 1):
             
-            # Sample an environment Pj
             if len(training_envs) > 1: # Multiple environments
                 sampled_config = np.random.choice(np.arange(0,len(training_envs)), p=sampling_dist)
                 env = training_envs[sampled_config]
                 index = 0 if trajectory == 0 else trajectory // batch_dimension
                 sampled_env_batched[index] = sampled_config
-
-        if trajectory % 10 == 0 : print("Trajectory n° %d" % (trajectory))
 
         s = env.reset()
 
@@ -207,8 +204,6 @@ def collect_particles_and_compute_knn(training_envs, sampling_dist, policy, num_
         nbrs.fit(next_states)
         distances[batch], indices[batch] = torch.tensor(nbrs.kneighbors(next_states))
 
-        print("Batch %d of %d" % (batch, num_batches))
-
     return states, actions, effective_trajectory_lengths, distances, indices, sampled_env_batched
 
 
@@ -226,6 +221,7 @@ def compute_importance_weights(behavioral_policy, target_policy, states, actions
 
         traj_particle_target_log_p = target_policy.get_log_p(traj_states, traj_actions)
         traj_particle_behavior_log_p = behavioral_policy.get_log_p(traj_states, traj_actions)
+
         traj_particle_iw = torch.exp(torch.cumsum(traj_particle_target_log_p - traj_particle_behavior_log_p, dim=0))
 
         if importance_weights is None:
@@ -244,7 +240,6 @@ def compute_entropy(behavioral_policy, target_policy, states, actions, num_batch
     if use_percentile:
         percentile_entropies = torch.zeros((percentile), dtype=float_type)
         percentile_entropies_with_no_grad = torch.zeros((percentile), dtype=float_type, requires_grad=False)
-        percentile_densities = torch.zeros((percentile), dtype=float_type)
     start_index = -batch_dimension
     end_index = 0
     for batch in range(num_batches):
@@ -257,9 +252,8 @@ def compute_entropy(behavioral_policy, target_policy, states, actions, num_batch
         # compute volume for each particle
         volumes = (torch.pow(distances[batch, :, k], ns) * torch.pow(torch.tensor(np.pi), ns/2)) / G
         # compute entropy
-        #n_sample = batch_dimension * trajectory_lengths.size()[0]
-        #entropies_with_no_grad[batch] = - (1 / n_sample) * torch.sum(torch.log((k / (n_sample*volumes + eps)) + eps)) + B
-        entropies_with_no_grad[batch] = - torch.sum((weights_sum.detach() / k) * torch.log((weights_sum.detach() / (volumes + eps)) + eps)) + B
+        n_sample = batch_dimension * trajectory_lengths.size()[0]
+        entropies_with_no_grad[batch] = - (1 / n_sample) * torch.sum(torch.log((k / (n_sample*volumes + eps)) + eps)) + B
         entropies[batch] = - torch.sum((weights_sum / k) * torch.log((weights_sum / (volumes + eps)) + eps)) + B
 
     if (num_batches != 1) and not is_policy_update:
@@ -268,40 +262,48 @@ def compute_entropy(behavioral_policy, target_policy, states, actions, num_batch
             biased_full_entropy.append(torch.mean(entropies).item())
             # Save the entropies of the mini-batches (for log purposes only)
             batch_entropies.append(entropies.tolist())
-        
+    
     if (use_percentile) and (num_batches != 1):
 
         ALPHA = percentile / num_batches
         
         sorted_entropies = torch.sort(entropies).values
         sorted_entropies_with_no_grad = torch.sort(entropies_with_no_grad).values
-        
+
         with torch.no_grad():
             # Get the indices in order to retrieve the batches of the sampled environments
             percentile_indices.append(list(np.array(torch.sort(entropies).indices[:percentile])))
-        
+            
         percentile_entropies = sorted_entropies[:percentile]
         percentile_entropies_with_no_grad = sorted_entropies_with_no_grad[:percentile]
-
-        percentile_densities = percentile_entropies / percentile_entropies_with_no_grad
-
+    
         # Add the baseline, if required
         if baseline and is_policy_update:
-
             # VaR baseline:
             empirical_var = sorted_entropies_with_no_grad[percentile]
-            return percentile_densities * (percentile_entropies_with_no_grad - percentile_entropies_with_no_grad * empirical_var)
+            return percentile_entropies * (1 - empirical_var)
 
-            # CVaR baseline:
-            #empirical_cvar = torch.mean(percentile_entropies_with_no_grad)
-            #return percentile_densities * (percentile_entropies_with_no_grad - percentile_entropies_with_no_grad * (empirical_cvar / ALPHA))
-
-            # MSE baseline:
-            #return percentile_densities * (percentile_entropies_with_no_grad - percentile_entropies_with_no_grad * empirical_var - percentile_entropies_with_no_grad * ((1 / (1 + (ALPHA**2)*num_batches)) * ((empirical_cvar / ALPHA) - empirical_var)))
-        
         return percentile_entropies
-    
+        
     return entropies
+
+
+def compute_kl(behavioral_policy, target_policy, states, actions, num_trajectories, trajectory_lengths, indices, k, eps):
+    importance_weights = compute_importance_weights(behavioral_policy, target_policy, states, actions, num_trajectories, trajectory_lengths)
+
+    weights_sum = torch.sum(importance_weights[indices[:, :-1]], dim=1)
+
+    # Compute KL divergence between behavioral and target policy
+    N = importance_weights.shape[0]
+    kl = (1 / N) * torch.sum(torch.log(k / (N * weights_sum) + eps))
+
+    numeric_error = torch.isinf(kl) or torch.isnan(kl)
+
+    # Minimum KL is zero
+    # NOTE: do not remove epsilon factor
+    kl = torch.max(torch.tensor(0.0), kl)
+
+    return kl, numeric_error
 
 
 def log_epoch_statistics(writer, log_file, log_entropies, log_gradients, csv_file_1, csv_file_2, epoch,
@@ -393,13 +395,14 @@ def log_epoch_statistics(writer, log_file, log_entropies, log_gradients, csv_fil
 
 
 def log_off_iter_statistics(writer, csv_file_3, epoch, global_off_iter,
-                            num_off_iter, entropy, lr):
+                            num_off_iter, entropy, kl, lr):
     # Log to csv file 3 to see what's going on during off policy optimization
-    csv_file_3.write(f"{epoch},{num_off_iter},{entropy},{lr}\n")
+    csv_file_3.write(f"{epoch},{num_off_iter},{entropy},{kl},{lr}\n")
     csv_file_3.flush()
 
     # Also log to tensorboard
     writer.add_scalar("Off policy iter Entropy", entropy, global_step=global_off_iter)
+    writer.add_scalar("Off policy iter KL", kl, global_step=global_off_iter)
 
 
 def get_grads(named_parameters):
@@ -425,7 +428,7 @@ def policy_update(optimizer, behavioral_policy, target_policy, states, actions, 
     return loss, numeric_error, grads
 
 
-def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy, batch_dimension, use_percentile, percentile, baseline, k, max_off_iters,
+def alphamepol(env, env_name, sampling_dist, state_filter, create_policy, batch_dimension, use_percentile, percentile, baseline, k, kl_threshold, max_off_iters,
           use_backtracking, backtrack_coeff, max_backtrack_try, eps,
           learning_rate, num_trajectories, trajectory_length, num_epochs, optimizer, full_entropy_k,
           heatmap_every, heatmap_discretizer, heatmap_episodes, heatmap_num_steps,
@@ -443,9 +446,9 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
     biased_full_entropy = []
     # List used to log the entropy of all the mini-batches at each epoch
     batch_entropies = []
-
-    training_envs = None
     
+    training_envs = None
+
     if (sampling_dist is not None) and (len(sampling_dist) > 1):
         # GridWorld with Slope
         if (env_name == 'GridWorld') or (env_name == 'MultiGrid'):
@@ -525,7 +528,7 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
     csv_file_1.write(",".join(['epoch', 'loss', 'cvar_entropy', 'full_entropy', 'num_off_iters','execution_time','perc_sampled_env', 'biased_full_entropy']))
     csv_file_1.write("\n")
 
-    if heatmap_discretizer is not None or env_name == 'AntMaze':
+    if heatmap_discretizer is not None or env.__class__.__name__ == 'MazeEnv':
         # Some kind of 2d discretizer is defined on this environment
         csv_file_2 = open(os.path.join(out_path, f"{env.__class__.__name__}-heatmap.csv"), 'w')
         csv_file_2.write(",".join(['epoch', 'average_entropy']))
@@ -534,7 +537,7 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
         csv_file_2 = None
 
     csv_file_3 = open(os.path.join(out_path, f"{env.__class__.__name__}_off_policy_iter.csv"), "w")
-    csv_file_3.write(",".join(['epoch', 'off_policy_iter', 'cvar_entropy', 'learning_rate']))
+    csv_file_3.write(",".join(['epoch', 'off_policy_iter', 'cvar_entropy', 'kl', 'learning_rate']))
     csv_file_3.write("\n")
 
     csv_file_4 = open(os.path.join(out_path, f"{env.__class__.__name__}_entropies.csv"), "w")
@@ -578,6 +581,7 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
             entropy = torch.mean(torch.sort(entropies).values[:percentile])
 
     execution_time = time.time() - t0
+    
     loss = - entropy
 
     perc_sampled_env = ""
@@ -589,9 +593,9 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
 
         occurrences = collections.Counter(np.array(percentile_sampled_env_batched))
         perc_sampled_env = ""
-        for c in range(len(probs)):
+        for c in range(len(sampling_dist)):
             perc_sampled_env += str(occurrences.get(c))
-            if c < len(probs)-1:
+            if c < len(sampling_dist)-1:
                 perc_sampled_env += "-"
 
     # Heatmap
@@ -628,6 +632,9 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
     # Main Loop
     global_num_off_iters = 0
 
+    if use_backtracking:
+        original_lr = learning_rate
+
     # Variables used to check convergence
     entropies_over_ten_epochs = [entropy]
     old_mean_entropy_over_ten_epochs = 0
@@ -638,6 +645,7 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
         t0 = time.time()
 
         # Off policy optimization
+        kl_threshold_reached = False
         last_valid_target_policy.load_state_dict(behavioral_policy.state_dict())
         num_off_iters = 0
 
@@ -646,113 +654,159 @@ def memento_reinforce(env, env_name, sampling_dist, state_filter, create_policy,
                 collect_particles_and_compute_knn(training_envs, sampling_dist, behavioral_policy, num_trajectories,
                                                   trajectory_length, num_batches, batch_dimension, state_filter, k, num_workers)
         
-        backtrack_iter = None
-        
-        # Indices of the batches corresponding to the percentile
-        percentile_indices = []
+        if use_backtracking:
+            learning_rate = original_lr
 
-        # Optimize policy
-        loss, numeric_error, grads = policy_update(optimizer, behavioral_policy, target_policy, states, actions, num_batches, batch_dimension, use_percentile, percentile, percentile_indices, baseline, effective_trajectory_lengths, distances, indices, biased_full_entropy, batch_entropies, k, G, B, ns, eps)
-        entropy = - loss.detach().numpy()
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = learning_rate
 
-        if not numeric_error:
-            # Valid update
-            last_valid_target_policy.load_state_dict(target_policy.state_dict())
-            num_off_iters += 1
-            global_num_off_iters += 1
-
-            # Log statistics for this off policy iteration
-            log_off_iter_statistics(writer, csv_file_3, epoch, global_num_off_iters, num_off_iters - 1,
-                                    entropy, learning_rate)
-        
-        # Indices of the batches corresponding to the percentile
-        percentile_indices = []
-        # Compute entropy of new policy
-        with torch.no_grad():
-            entropies = compute_entropy(last_valid_target_policy, last_valid_target_policy, states, actions,
-                                        num_batches, batch_dimension, use_percentile, percentile, percentile_indices, baseline, effective_trajectory_lengths,
-                                        distances, indices, biased_full_entropy, batch_entropies, False, k, G, B, ns, eps)
-            # CVaR entropy
-            if use_percentile:
-                entropy = torch.mean(entropies)
-            else:
-                entropy = torch.mean(torch.sort(entropies).values[:percentile])
-
-        perc_sampled_env = ""
-        if use_percentile:
-            # Compute the occurrences of the sampled environments
-            percentile_sampled_env_batched = torch.zeros((percentile), dtype=torch.int32)
-            for batch in range(percentile):
-                percentile_sampled_env_batched[batch] = sampled_env_batched[percentile_indices[0][batch]]
-
-            occurrences = collections.Counter(np.array(percentile_sampled_env_batched))
-            perc_sampled_env = ""
-            for c in range(len(probs)):
-                perc_sampled_env += str(occurrences.get(c))
-                if c < len(probs)-1:
-                    perc_sampled_env += "-"
-        
-        if np.isnan(entropy) or np.isinf(entropy):
-            print("Aborting because final entropy is nan or inf...")
-            print("There is most likely a problem in knn aliasing. Use a higher k.")
-            exit()
+            backtrack_iter = 1
         else:
-            # End of epoch, prepare statistics to log
-            epoch += 1
+            backtrack_iter = None
+        
+        # Indices of the batches corresponding to the percentile
+        percentile_indices = []
 
-            # Update behavioral policy
-            behavioral_policy.load_state_dict(last_valid_target_policy.state_dict())
-            target_policy.load_state_dict(last_valid_target_policy.state_dict())
+        while not kl_threshold_reached:
+            # Optimize policy
+            loss, numeric_error, grads = policy_update(optimizer, behavioral_policy, target_policy, states, actions, num_batches, batch_dimension, use_percentile, percentile, percentile_indices, baseline, effective_trajectory_lengths, distances, indices, biased_full_entropy, batch_entropies, k, G, B, ns, eps)
+            entropy = - loss.detach().numpy()
 
-            loss = - entropy.numpy()
-            entropy = entropy.numpy()
-            execution_time = time.time() - t0
+            if not numeric_error:
+                with torch.no_grad():
+                    kl, kl_numeric_error = compute_kl(behavioral_policy, target_policy, states,
+                                                        actions, num_trajectories, effective_trajectory_lengths,
+                                                        indices.reshape(num_batches*batch_dimension*trajectory_length, k+1), k, eps)
+                kl = kl.numpy()
 
-            if epoch % heatmap_every == 0:
-                # Heatmap
-                if heatmap_discretizer is not None or env_name == 'AntMaze':
-                    _, heatmap_entropy, heatmap_image = \
-                        get_heatmap(training_envs, env_name, sampling_dist, behavioral_policy, heatmap_discretizer, heatmap_episodes, heatmap_num_steps, batch_dimension, heatmap_cmap, heatmap_interp, heatmap_labels)
+                if not kl_numeric_error:
+                    if kl <= kl_threshold:
+                        # Valid update
+                        last_valid_target_policy.load_state_dict(target_policy.state_dict())
+                        num_off_iters += 1
+                        global_num_off_iters += 1
+
+                        # Log statistics for this off policy iteration
+                        log_off_iter_statistics(writer, csv_file_3, epoch, global_num_off_iters, num_off_iters - 1, entropy, kl, learning_rate)           
+                    else:
+                        if use_backtracking:
+                            # We are here because we need to perform one last update
+                            if not backtrack_iter == max_backtrack_try:
+                                target_policy.load_state_dict(last_valid_target_policy.state_dict())
+
+                                learning_rate = original_lr / (backtrack_coeff ** backtrack_iter)
+
+                                for param_group in optimizer.param_groups:
+                                    param_group['lr'] = learning_rate
+
+                                backtrack_iter += 1
+                                continue
                 else:
-                    heatmap_entropy = None
-                    heatmap_image = None
+                    # Do not accept the update, set exit condition to end the epoch
+                    kl_threshold_reached = True
+            else:
+                # Set exit condition to end the epoch
+                kl_threshold_reached = True
+            
+            if use_backtracking and backtrack_iter > 1:
+                # Just perform at most 1 step using backtracking
+                kl_threshold_reached = True
 
-                # Save policy
-                torch.save(behavioral_policy.state_dict(), os.path.join(out_path, f"{epoch}-policy"))
-
+            if num_off_iters == max_off_iters:
+                # Set exit condition also if the maximum number of off policy opt iterations has been reached
+                kl_threshold_reached = True
+            
+            if kl_threshold_reached:
                 # Indices of the batches corresponding to the percentile
                 percentile_indices = []
-                # Full entropy
-                states, actions, effective_trajectory_lengths, distances, indices, sampled_env_batched = \
-                    collect_particles_and_compute_knn(training_envs, sampling_dist, behavioral_policy, num_trajectories,
-                                                        trajectory_length, 1, num_trajectories, state_filter, full_entropy_k, num_workers)
+                # In case of successful off-policy optimization, compute entropy of new policy
+                if not numeric_error:
+                    with torch.no_grad():
+                        entropies = compute_entropy(last_valid_target_policy, last_valid_target_policy, states, actions,
+                                                    num_batches, batch_dimension, use_percentile, percentile, percentile_indices, baseline, effective_trajectory_lengths,
+                                                    distances, indices, biased_full_entropy, batch_entropies, False, k, G, B, ns, eps)
+                        # CVaR entropy
+                        if use_percentile:
+                            entropy = torch.mean(entropies)
+                        else:
+                            entropy = torch.mean(torch.sort(entropies).values[:percentile])
 
-                with torch.no_grad():
-                    full_entropies = compute_entropy(behavioral_policy, behavioral_policy, states, actions,
-                                                    1, num_trajectories, 0, num_batches, percentile_indices, baseline, effective_trajectory_lengths,
-                                                    distances, indices, biased_full_entropy, batch_entropies, False, full_entropy_k, G, full_B, ns, eps)
-                    full_entropy = full_entropies[0]
+                    perc_sampled_env = ""
+                    if use_percentile:
+                        # Compute the occurrences of the sampled environments
+                        percentile_sampled_env_batched = torch.zeros((percentile), dtype=torch.int32)
+                        for batch in range(percentile):
+                            percentile_sampled_env_batched[batch] = sampled_env_batched[percentile_indices[0][batch]]
 
-            else:
-                heatmap_entropy = None
-                heatmap_image = None
+                        occurrences = collections.Counter(np.array(percentile_sampled_env_batched))
+                        perc_sampled_env = ""
+                        for c in range(len(sampling_dist)):
+                            perc_sampled_env += str(occurrences.get(c))
+                            if c < len(sampling_dist)-1:
+                                perc_sampled_env += "-"
+               
+                if np.isnan(entropy) or np.isinf(entropy):
+                    print("Aborting because final entropy is nan or inf...")
+                    print("There is most likely a problem in knn aliasing. Use a higher k.")
+                    exit()
+                else:
+                    # End of epoch, prepare statistics to log
+                    epoch += 1
 
-            # Log statistics for this epoch
-            log_epoch_statistics(
-                writer=writer, log_file=log_file, log_entropies=csv_file_4, log_gradients=log_gradients, csv_file_1=csv_file_1, csv_file_2=csv_file_2,
-                epoch=epoch,
-                loss=loss,
-                entropy=entropy,
-                batch_entropies=batch_entropies[-1] if len(batch_entropies) > 0 else None,
-                sampled_env=sampled_env_batched,
-                grads=grads,
-                execution_time=execution_time,
-                num_off_iters=num_off_iters,
-                full_entropy=full_entropy,
-                biased_full_entropy=biased_full_entropy[-1] if len(biased_full_entropy) > 0 else None,
-                perc_sampled_env=perc_sampled_env,
-                heatmap_image=heatmap_image,
-                heatmap_entropy=heatmap_entropy,
-                backtrack_iters=backtrack_iter,
-                backtrack_lr=learning_rate
-            )
+                    # Update behavioral policy
+                    behavioral_policy.load_state_dict(last_valid_target_policy.state_dict())
+                    target_policy.load_state_dict(last_valid_target_policy.state_dict())
+
+                    loss = - entropy.numpy()
+                    entropy = entropy.numpy()
+                    execution_time = time.time() - t0
+
+                    if epoch % heatmap_every == 0:
+                        # Heatmap
+                        if heatmap_discretizer is not None or env_name == 'AntMaze':
+                            _, heatmap_entropy, heatmap_image = \
+                                get_heatmap(training_envs, env_name, sampling_dist, behavioral_policy, heatmap_discretizer, heatmap_episodes, heatmap_num_steps, batch_dimension, heatmap_cmap, heatmap_interp, heatmap_labels)
+                        else:
+                            heatmap_entropy = None
+                            heatmap_image = None
+
+                        # Indices of the batches corresponding to the percentile
+                        percentile_indices = []
+                        # Full entropy
+                        states, actions, effective_trajectory_lengths, distances, indices, sampled_env_batched = \
+                            collect_particles_and_compute_knn(training_envs, sampling_dist, behavioral_policy, num_trajectories,
+                                                                trajectory_length, 1, num_trajectories, state_filter, full_entropy_k, num_workers)
+
+                        with torch.no_grad():
+                            full_entropies = compute_entropy(behavioral_policy, behavioral_policy, states, actions,
+                                                            1, num_trajectories, 0, num_batches, percentile_indices, baseline, effective_trajectory_lengths,
+                                                            distances, indices, biased_full_entropy, batch_entropies, False, full_entropy_k, G, full_B, ns, eps)
+                        
+                            full_entropy = full_entropies[0]
+
+                        # Save policy
+                        torch.save(behavioral_policy.state_dict(), os.path.join(out_path, f"{epoch}-policy"))
+
+                    else:
+                        heatmap_entropy = None
+                        heatmap_image = None
+
+                    # Log statistics for this epoch
+                    log_epoch_statistics(
+                        writer=writer, log_file=log_file, log_entropies=csv_file_4, log_gradients=log_gradients, csv_file_1=csv_file_1, csv_file_2=csv_file_2,
+                        epoch=epoch,
+                        loss=loss,
+                        entropy=entropy,
+                        batch_entropies=batch_entropies[-1] if len(batch_entropies) > 0 else None,
+                        sampled_env=sampled_env_batched,
+                        grads=grads,
+                        execution_time=execution_time,
+                        num_off_iters=num_off_iters,
+                        full_entropy=full_entropy,
+                        biased_full_entropy=biased_full_entropy[-1] if len(biased_full_entropy) > 0 else None,
+                        perc_sampled_env=perc_sampled_env,
+                        heatmap_image=heatmap_image,
+                        heatmap_entropy=heatmap_entropy,
+                        backtrack_iters=backtrack_iter,
+                        backtrack_lr=learning_rate
+                    )

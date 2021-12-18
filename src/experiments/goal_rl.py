@@ -18,7 +18,7 @@ from algorithms.trpo import trpo
 from policy import GaussianPolicy, Encoder, ValueFunction
 
 
-parser = argparse.ArgumentParser(description='Goal-Based Reinforcement Learning - TRPO')
+parser = argparse.ArgumentParser(description='Supervised Fine-Tuning - TRPO')
 
 parser.add_argument('--num_workers', type=int, default=1,
                     help='How many parallel workers to use when collecting samples')
@@ -199,7 +199,7 @@ else:
 
 
 if args.policy_init is not None:
-    kind = 'MEMENTOInit'
+    kind = 'ALPHAMEPOLInit'
     policy.load_state_dict(torch.load(args.policy_init))
 else:
     kind = 'RandomInit'

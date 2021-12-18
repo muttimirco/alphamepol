@@ -389,7 +389,7 @@ def weights_init(m):
         torch.nn.init.zeros_(m.bias)
 
 
-def memento_visual(env, sampling_dist, state_filter, create_policy, batch_dimension, use_percentile, percentile, baseline, k, kl_threshold, max_off_iters,
+def alphamepol_visual(env, sampling_dist, state_filter, create_policy, batch_dimension, use_percentile, percentile, baseline, k, kl_threshold, max_off_iters,
           use_backtracking, backtrack_coeff, max_backtrack_try, eps,
           learning_rate, num_trajectories, trajectory_length, num_epochs, optimizer, full_entropy_k,
           heatmap_every, heatmap_discretizer, heatmap_episodes, heatmap_num_steps,

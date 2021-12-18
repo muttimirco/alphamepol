@@ -12,11 +12,11 @@ from envs.multigrid import MultiGrid
 from envs.discretizer import Discretizer
 from maze_env import MazeEnv
 from datetime import datetime
-from algorithms.memento_reinforce import memento_reinforce
+from algorithms.alphamepol_reinforce import alphamepol_reinforce
 from policy import GaussianPolicy, train_supervised
 
 
-parser = argparse.ArgumentParser(description='MEMENTO')
+parser = argparse.ArgumentParser(description='ALPHAMEPOL REINFORCE VERSION')
 
 parser.add_argument('--num_workers', type=int, default=1,
                     help='How many parallel workers to use when collecting env trajectories and compute k-nn')
@@ -68,7 +68,7 @@ parser.add_argument('--full_entropy_k', type=int, required=True,
                     help='The number of neighbors used to compute the full entropy')
 parser.add_argument('--seed', type=int, default=None,
                     help='The random seed')
-parser.add_argument('--tb_dir_name', type=str, default='memento',
+parser.add_argument('--tb_dir_name', type=str, default='alphamepol',
                     help='The tensorboard directory under which the directory of this experiment is put')
 
 args = parser.parse_args()
@@ -179,7 +179,7 @@ with open(os.path.join(out_path, 'log_info.txt'), 'w') as f:
         args.seed = np.random.randint(2**16-1)
         f.write("Setting random seed {}\n".format(args.seed))
 
-memento_reinforce(
+alphamepol_reinforce(
     env=env,
     env_name=args.env,
     sampling_dist=args.sampling_dist,

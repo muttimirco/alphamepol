@@ -1,5 +1,5 @@
-# MEMENTO
-This repository contains the implementation of the **MEMENTO** algorithm.
+# ALPHAMEPOL
+This repository contains the implementation of the **ALPHAMEPOL** algorithm.
 
 ## Installation
 In order to use this codebase you need to work with a Python version >= 3.6. Moreover, you need to have a working setup of Mujoco with a valid Mujco license. To setup Mujoco, have a look [here](http://www.mujoco.org/).
@@ -16,18 +16,18 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Learning to Explore
-To reproduce the *Learning to Explore* experiments in the paper, run:
+### Unsupervised Pre-Training
+To reproduce the *Unsupervised Pre-Training* experiments in the paper, run:
 ```bash
-./scripts/exploration/[gridworld_with_slope.sh | multigrid.sh | antmaze.sh | minigrid.sh]
+./scripts/exploration/[gridworld_with_slope.sh | multigrid.sh | ant.sh | minigrid.sh]
 ```
 
-### Goal-Based Reinforcement Learning
-To reproduce the goal-based RL experiments, run:
+### Supervised Fine-Tuning
+To reproduce the *Supervised Fine-Tuning* experiments, run:
 ```bash
-./scripts/goal_rl/[gridworld_with_slope.sh | multigrid.sh | antmaze.sh | minigrid.sh]
+./scripts/goal_rl/[gridworld_with_slope.sh | multigrid.sh | ant.sh | minigrid.sh]
 ```
-By default, this will launch TRPO with MEMENTO initialization. To launch TRPO with a random initialization, simply omit the *policy_init* argument in the scripts.
+By default, this will launch TRPO with ALPHAMEPOL initialization. To launch TRPO with a random initialization, simply omit the *policy_init* argument in the scripts.
 
 Moreover, note that the scripts for the *GridWorld with Slope* and *MultiGrid* experiments have the argument ```num_goals = 50```, meaning that the training will be performed with one goal at a time. If you want to speed up the process, you can use several processes (ideally one for each goal), by passing as argument ```num_goals = 1``` and changing incrementally the seed. As regards the *Ant* and *MiniGrid* experiments, since the goals are predefined, you can also set the ```goal_index``` argument to specify a goal (from 0 to 7 and from 0 to 12 respectively).
 

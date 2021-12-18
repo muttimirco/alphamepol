@@ -1,4 +1,4 @@
-python src/experiments/memento.py --env GridWorld \
+python src/experiments/alphamepol.py --env GridWorld \
     --sampling_dist 0.8 0.2 --batch_dimension 5 --use_percentile 1 \
     --percentile 14 --k 30 --kl_threshold 15 \
     --learning_rate 0.00001 --num_trajectories 200 --trajectory_length 400 \
