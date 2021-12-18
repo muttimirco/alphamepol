@@ -1,5 +1,5 @@
 # ALPHAMEPOL
-This repository contains the implementation of the **ALPHAMEPOL** algorithm.
+This repository contains the implementation of the **ALPHAMEPOL** algorithm, presented in [Unsupervised Reinforcement Learning in Multiple Environments](https://arxiv.org/abs/2112.08746).
 
 ## Installation
 In order to use this codebase you need to work with a Python version >= 3.6. Moreover, you need to have a working setup of Mujoco with a valid Mujco license. To setup Mujoco, have a look [here](http://www.mujoco.org/).
